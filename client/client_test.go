@@ -704,6 +704,101 @@ func TestProgressiveCallInvocations(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// Tests that a callee can return error while caller IsInProgress
+func TestProgressiveCallInvocationCalleeError(t *testing.T) {
+	// Connect two clients to the same server
+	callee, caller, rooter := connectedTestClients(t)
+
+	const forcedError = wamp.URI("error.forced")
+	moreArgsSent := make(chan struct{}, 1)
+	errorRaised := false
+
+	invocationHandler := func(ctx context.Context, inv *wamp.Invocation) InvokeResult {
+		switch inv.Arguments[0].(int) {
+		case 1:
+			// Eat the first arg
+			t.Log("n=1 Returning OmitResult")
+			return InvokeResult{Err: wamp.InternalProgressiveOmitResult}
+		case 2:
+			t.Log("n=2 Waiting for moreArgsSent")
+			// Wait till the 4th arg is sent which means 3 should already
+			// be waiting
+			<-moreArgsSent
+			time.Sleep(100 * time.Millisecond)
+			errorRaised = true
+			t.Log("n=2 Returning error (as expected)")
+			// Error
+			return InvokeResult{Err: forcedError}
+		default:
+			// BUG: The handler function should never be called again
+			t.Error("Handler should not have been called after error returned")
+			return InvokeResult{Err: forcedError}
+		}
+	}
+
+	const procName = "nexus.test.progprocerr"
+
+	// Register procedure
+	err := callee.Register(procName, invocationHandler, nil)
+	require.NoError(t, err)
+
+	// Test calling the procedure.
+	callArgs := []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+	ctx := context.Background()
+
+	callSends := 0
+	sendProgDataCb := func(ctx context.Context) (options wamp.Dict, args wamp.List, kwargs wamp.Dict, err error) {
+		options = wamp.Dict{}
+
+		if callSends == (len(callArgs) - 1) {
+			options[wamp.OptProgress] = false
+		} else {
+			options[wamp.OptProgress] = true
+		}
+
+		args = wamp.List{callArgs[callSends]}
+		callSends++
+
+		// signal the handler should return its error
+		if 4 == callSends {
+			moreArgsSent <- struct{}{}
+		}
+		t.Logf("Sending n=%v", callSends)
+
+		return options, args, nil, nil
+	}
+
+	result, err := caller.CallProgressive(ctx, procName, sendProgDataCb, nil)
+	require.Error(t, err, "Expected call to return an error")
+	require.Nil(t, result, "Expected call to return no result")
+	var rErr RPCError
+	if errors.As(err, &rErr) {
+		require.Equal(t, forcedError, rErr.Err.Error, "Unexpected error URI")
+	} else {
+		t.Error("Unexpected error type")
+	}
+	require.GreaterOrEqual(t, callSends, 4)
+	require.True(t, errorRaised, "Error was never raised in handler")
+
+	// Test unregister.
+	err = callee.Unregister(procName)
+	// require.NoError(t, err)
+
+	// BUG: Show deadlock
+	t.Log("Closing rooter")
+	rooter.Close()
+	t.Log("Closing caller")
+	caller.Close()
+	goleak.VerifyNone(t)
+	t.Log("Closing callee")
+	// BUG: We never get past here
+	callee.Close()
+
+	t.Log("All closed")
+	goleak.VerifyNone(t)
+	t.Log("Done")
+}
+
 func TestProgressiveCallsAndResults(t *testing.T) {
 	// Connect two clients to the same server
 	callee, caller, _ := connectedTestClients(t)
