@@ -30,6 +30,9 @@ const (
 
 	testTopic  = "test.topic1"
 	testTopic2 = "test.topic2"
+
+	debugClientEnv = "TEST_DEBUG_CLIENT"
+	debugRouterEnv = "TEST_DEBUG_ROUTER"
 )
 
 var logger stdlog.StdLog
@@ -47,6 +50,7 @@ func checkGoLeaks(t *testing.T) {
 func getTestRouter(t *testing.T, realmConfig *router.RealmConfig) router.Router {
 	config := &router.Config{
 		RealmConfigs: []*router.RealmConfig{realmConfig},
+		Debug:        os.Getenv(debugRouterEnv) != "",
 	}
 	r, err := router.NewRouter(config, logger)
 	require.NoError(t, err)
@@ -95,7 +99,7 @@ func newTestClientConfig(realmName string, fns ...clientConfigMutator) *Config {
 		Realm:           realmName,
 		ResponseTimeout: 500 * time.Millisecond,
 		Logger:          logger,
-		Debug:           false,
+		Debug:           os.Getenv(debugClientEnv) != "",
 	}
 	for _, fn := range fns {
 		fn(clientConfig)
@@ -707,7 +711,16 @@ func TestProgressiveCallInvocations(t *testing.T) {
 // Tests that a callee can return error while caller IsInProgress
 func TestProgressiveCallInvocationCalleeError(t *testing.T) {
 	// Connect two clients to the same server
+	t.Setenv(debugRouterEnv, "1")
+	t.Setenv(debugClientEnv, "1")
 	callee, caller, rooter := connectedTestClients(t)
+
+	var anotherCallee *Client
+	doit := false
+	if doit {
+		newCallee := newTestClient(t, rooter)
+		anotherCallee = newCallee
+	}
 
 	const forcedError = wamp.URI("error.forced")
 	moreArgsSent := make(chan struct{}, 1)
@@ -738,8 +751,17 @@ func TestProgressiveCallInvocationCalleeError(t *testing.T) {
 
 	const procName = "nexus.test.progprocerr"
 
+	// TODO: drop this
+	registerOptions := wamp.Dict{}
+	registerOptions[wamp.OptInvoke] = "first"
+
+	if anotherCallee != nil {
+		er2 := anotherCallee.Register(procName, invocationHandler, registerOptions)
+		require.NoError(t, er2)
+	}
+
 	// Register procedure
-	err := callee.Register(procName, invocationHandler, nil)
+	err := callee.Register(procName, invocationHandler, registerOptions)
 	require.NoError(t, err)
 
 	// Test calling the procedure.

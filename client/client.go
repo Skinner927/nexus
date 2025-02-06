@@ -50,12 +50,13 @@ type Client struct {
 	eventHandlers map[wamp.ID]EventHandler
 	topicSubID    map[string]wamp.ID
 
-	invHandlers       map[wamp.ID]InvocationHandler
-	invHandlersQueues map[clientInvocation]chan *wamp.Invocation
-	invHandlersCtxs   map[clientInvocation]context.Context
-	nameProcID        map[string]wamp.ID
-	invHandlerKill    map[wamp.ID]context.CancelFunc
-	progGate          map[wamp.ID]struct{}
+	invHandlers         map[wamp.ID]InvocationHandler
+	invHandlersQueues   map[clientInvocation]chan *wamp.Invocation
+	invHandlersCtxs     map[clientInvocation]context.Context
+	invHandlerLastReqId wamp.ID
+	nameProcID          map[string]wamp.ID
+	invHandlerKill      map[wamp.ID]context.CancelFunc
+	progGate            map[wamp.ID]struct{}
 
 	activeInvHandlers sync.WaitGroup
 
@@ -69,7 +70,8 @@ type Client struct {
 	closed bool
 
 	routerGoodbye *wamp.Goodbye
-	idGen         *wamp.SyncIDGen
+	// TODO: Remove this and use session instead
+	idGen *wamp.SyncIDGen
 }
 
 // InvokeResult represents the result of invoking a procedure.
@@ -246,12 +248,13 @@ func NewClient(p wamp.Peer, cfg Config) (*Client, error) {
 		eventHandlers: map[wamp.ID]EventHandler{},
 		topicSubID:    map[string]wamp.ID{},
 
-		invHandlers:       map[wamp.ID]InvocationHandler{},
-		invHandlersQueues: map[clientInvocation]chan *wamp.Invocation{},
-		invHandlersCtxs:   map[clientInvocation]context.Context{},
-		nameProcID:        map[string]wamp.ID{},
-		invHandlerKill:    map[wamp.ID]context.CancelFunc{},
-		progGate:          map[wamp.ID]struct{}{},
+		invHandlers:         map[wamp.ID]InvocationHandler{},
+		invHandlersQueues:   map[clientInvocation]chan *wamp.Invocation{},
+		invHandlersCtxs:     map[clientInvocation]context.Context{},
+		invHandlerLastReqId: 0,
+		nameProcID:          map[string]wamp.ID{},
+		invHandlerKill:      map[wamp.ID]context.CancelFunc{},
+		progGate:            map[wamp.ID]struct{}{},
 
 		log:        cfg.Logger,
 		debug:      cfg.Debug,
@@ -1445,28 +1448,39 @@ func (c *Client) runReceiveFromRouter(msg wamp.Message) bool {
 	if c.debug {
 		c.log.Println("Client", c.sess, "received", msg.MessageType())
 	}
+	fmt.Println("$$ Client sessionID", c.ID(), "idGen", c.idGen.PeekCurrent())
+
 	switch msg := msg.(type) {
 	case *wamp.Event:
 		c.runHandleEvent(msg)
 
 	case *wamp.Invocation:
+		fmt.Println("<< Invocation ID", msg.Request)
 		c.runHandleInvocation(msg)
 	case *wamp.Interrupt:
+		fmt.Println("<< Interrupt ID", msg.Request)
 		c.runHandleInterrupt(msg)
 
 	case *wamp.Registered:
+		fmt.Println("<< Reg ID", msg.Request, msg.Registration)
 		c.runSignalReply(msg, msg.Request)
 	case *wamp.Subscribed:
+		fmt.Println("<< Sub ID", msg.Request, msg.Subscription)
 		c.runSignalReply(msg, msg.Request)
 	case *wamp.Unsubscribed:
+		fmt.Println("<< UnSub ID", msg.Request)
 		c.runSignalReply(msg, msg.Request)
 	case *wamp.Unregistered:
+		fmt.Println("<< UnReg ID", msg.Request)
 		c.runSignalReply(msg, msg.Request)
 	case *wamp.Result:
+		fmt.Println("<< Result ID", msg.Request)
 		c.runSignalReply(msg, msg.Request)
 	case *wamp.Published:
+		fmt.Println("<< Publish ID", msg.Request, msg.Publication)
 		c.runSignalReply(msg, msg.Request)
 	case *wamp.Error:
+		fmt.Println("<< Error ID", msg.Request)
 		c.runSignalReply(msg, msg.Request)
 
 	case *wamp.Goodbye:
@@ -1535,6 +1549,32 @@ func (c *Client) runHandleEvent(msg *wamp.Event) {
 	handler(msg)
 }
 
+func (c *Client) cleanupInvHandlersQueue(cliInvocation clientInvocation, flushChan bool) {
+	c.sess.Lock()
+	if _, ok := c.invHandlersQueues[cliInvocation]; !ok {
+		c.sess.Unlock()
+		return
+	}
+	if c.debug {
+		c.log.Println("Running cleanupInvHandlersQueue cleanup for", cliInvocation)
+	}
+	// Try to get any remaining values off the chan so
+	// `handlerQueue <- msg` (above) does not block forever
+	for flushChan {
+		select {
+		case <-c.invHandlersQueues[cliInvocation]:
+			continue
+		default:
+			flushChan = false
+			break
+		}
+	}
+	close(c.invHandlersQueues[cliInvocation])
+	delete(c.invHandlersQueues, cliInvocation)
+	delete(c.invHandlersCtxs, cliInvocation)
+	c.sess.Unlock()
+}
+
 // runHandleInvocation processes an INVOCATION message from the router
 // requesting a call to a registered RPC procedure.
 func (c *Client) runHandleInvocation(msg *wamp.Invocation) {
@@ -1542,6 +1582,7 @@ func (c *Client) runHandleInvocation(msg *wamp.Invocation) {
 	timeout, _ := wamp.AsInt64(msg.Details[wamp.OptTimeout])
 	progResOK, _ := msg.Details[wamp.OptReceiveProgress].(bool)
 	reqID := msg.Request
+	fmt.Println("REQID ", reqID)
 
 	c.sess.Lock()
 	handler, ok := c.invHandlers[msg.Registration]
@@ -1616,6 +1657,27 @@ func (c *Client) runHandleInvocation(msg *wamp.Invocation) {
 	handlerQueue, queueExists := c.invHandlersQueues[cliInvocation]
 	ctx := c.invHandlersCtxs[cliInvocation]
 	if !queueExists {
+		// Only create the queue if we haven't seen this request ID.
+		// WAMP specification `7.1. Ordering Guarantees` says we are guaranteed
+		// to get requests in-order. Checking the reqID also ensures we do
+		// not re-create a queue that was closed on our end before the Dealer
+		// got our message.
+		fmt.Println("Checking 1:", c.invHandlerLastReqId >= reqID, " 2:", c.idGen.PeekCurrent(), reqID, c.idGen.PeekCurrent() >= reqID)
+		if c.invHandlerLastReqId >= reqID && c.idGen.PeekCurrent() >= reqID {
+			// `&& c.idGen.PeekCurrent() >= reqID` is supposed to help detect
+			// ID rollover
+			c.sess.Unlock()
+			if c.debug {
+				c.log.Println("Ignoring expired reqID=", reqID)
+			}
+			// discard silently
+			return
+		}
+		c.invHandlerLastReqId = reqID
+
+		if c.debug {
+			c.log.Println("Creating new handlerQueue reqID=", reqID)
+		}
 		handlerQueue = make(chan *wamp.Invocation, 1)
 		c.invHandlersQueues[cliInvocation] = handlerQueue
 
@@ -1638,7 +1700,6 @@ func (c *Client) runHandleInvocation(msg *wamp.Invocation) {
 			ctx = context.WithValue(ctx, invocationIDCtxKey{}, reqID)
 		}
 	}
-
 	c.sess.Unlock()
 
 	handlerQueue <- msg
@@ -1653,21 +1714,75 @@ func (c *Client) runHandleInvocation(msg *wamp.Invocation) {
 			// blocked forever waiting to send the result to the channel.
 			resChan := make(chan InvokeResult, 1)
 			go func() {
-				for msg := range handlerQueue {
-
-					if isInProgress, _ := msg.Details[wamp.OptProgress].(bool); !isInProgress {
-						c.sess.Lock()
-						close(c.invHandlersQueues[cliInvocation])
-						delete(c.invHandlersQueues, cliInvocation)
-						delete(c.invHandlersCtxs, cliInvocation)
-						c.sess.Unlock()
-					}
-
-					// The Context is passed into the handler to tell the client
-					// application to stop whatever it is doing if it cares to pay
-					// attention.
-					resChan <- handler(ctx, msg)
+				defer c.cleanupInvHandlersQueue(cliInvocation, true)
+				if c.debug {
+					c.log.Println("handlerQueue consumer routine started")
 				}
+
+				pullMessages := true
+				for pullMessages {
+					select {
+					case msg := <-handlerQueue:
+						if msg == nil {
+							pullMessages = false
+							break
+						}
+						if isInProgress, _ := msg.Details[wamp.OptProgress].(bool); !isInProgress {
+							c.cleanupInvHandlersQueue(cliInvocation, false)
+						}
+
+						// The Context is passed into the handler to tell the client
+						// application to stop whatever it is doing if it cares to pay
+						// attention.
+						result := handler(ctx, msg)
+						resChan <- result
+						if result.Err != "" && result.Err != wamp.InternalProgressiveOmitResult {
+							pullMessages = false
+							break
+						}
+						continue
+					case <-c.Done():
+						pullMessages = false
+						break
+					case <-ctx.Done():
+						pullMessages = false
+						break
+					}
+				}
+
+				// for msg := range handlerQueue {
+				// 	fmt.Println("processMessages", processMessages)
+				// 	if !processMessages.c {
+				// 		continue
+				// 	}
+				// 	if isInProgress, _ := msg.Details[wamp.OptProgress].(bool); !isInProgress {
+				// 		cleanupQueue()
+				// 	}
+				//
+				// 	// The Context is passed into the handler to tell the client
+				// 	// application to stop whatever it is doing if it cares to pay
+				// 	// attention.
+				// 	result := handler(ctx, msg)
+				// 	if result.Err != "" && result.Err != wamp.InternalProgressiveOmitResult {
+				// 		processMessages.c = false
+				// 		cleanupQueue()
+				// 	}
+				// 	resChan <- result
+				// }
+
+				// Drain
+				for {
+					select {
+					case msg := <-handlerQueue:
+						if msg == nil {
+							return
+						}
+						continue
+					default:
+						return
+					}
+				}
+
 			}()
 
 			// Remove the kill switch when done processing invocation.
@@ -1680,8 +1795,8 @@ func (c *Client) runHandleInvocation(msg *wamp.Invocation) {
 			}()
 
 			// Wait for the handler to finish or for the call to be canceled.
-			var result InvokeResult
 			isProcessing := true
+			var result InvokeResult
 			for isProcessing {
 				select {
 				case result = <-resChan:

@@ -53,3 +53,11 @@ func (g *SyncIDGen) Next() ID {
 	defer g.lock.Unlock()
 	return g.IDGen.Next()
 }
+
+// TODO: DROP
+// PeekCurrent returns the current value to be used to detect rollover
+func (g *SyncIDGen) PeekCurrent() ID {
+	g.lock.Lock()
+	defer g.lock.Unlock()
+	return ID(g.IDGen.next)
+}

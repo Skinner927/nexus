@@ -15,6 +15,7 @@ type Session struct {
 	ID ID
 	// Details about session.
 	Details Dict
+	IdGen   *SyncIDGen
 
 	// Roles and features supported by peer.
 	roles map[string]map[string]struct{}
@@ -36,6 +37,7 @@ func NewSession(peer Peer, id ID, details Dict, greetDetails Dict) *Session {
 		Peer:    peer,
 		ID:      id,
 		Details: details,
+		IdGen:   new(SyncIDGen),
 	}
 	s.setRoles(greetDetails)
 	return s

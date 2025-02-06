@@ -173,6 +173,151 @@ func TestBasicCall(t *testing.T) {
 	require.Equal(t, wamp.ID(126), errMsg.Request, "wrong request ID in ERROR, should match call ID")
 }
 
+// Ensure INVOCATION.Request IDs are incremented by 1 and scoped to the
+// callee's session.
+func TestInvocationSessionSequentialIDs(t *testing.T) {
+	dealer, _ := newTestDealer(t)
+
+	// Set up 2 callees with 2 unique registered procedure names
+	const numCallee = 2
+	const numProcNames = 2
+	var procNames [numCallee][numProcNames]wamp.URI
+	var callee [numCallee]*testPeer
+	var calleeSess [numCallee]*wamp.Session
+	for i := 0; i < numCallee; i++ {
+		callee[i] = newTestPeer()
+		calleeSess[i] = wamp.NewSession(callee[i], 0, nil, nil)
+
+		for n := 0; n < numProcNames; n++ {
+			procNames[i][n] = wamp.URI(fmt.Sprintf("nexus.test.callee%d.proc%d", i, n))
+			dealer.register(calleeSess[i],
+				&wamp.Register{
+					Request:   wamp.ID((i * numProcNames) + n + 1),
+					Procedure: procNames[i][n],
+				})
+
+			var rsp wamp.Message
+			select {
+			case rsp = <-callee[i].Recv():
+			case <-time.After(time.Millisecond):
+				require.FailNowf(t, "timed out waiting for response", "callee[%d]", i)
+			}
+			switch rsp.(type) {
+			case *wamp.Registered:
+				break // correct
+			case *wamp.Error:
+				require.FailNowf(t, "error registering procedure",
+					"callee[%d] err=%v", i, rsp.(*wamp.Error))
+			default:
+				require.FailNowf(t, "did not receive REGISTERED response",
+					"callee[%d] got=%v", i, rsp.MessageType())
+
+			}
+		}
+	}
+
+	// callee := newTestPeer()
+	// calleeSess := wamp.NewSession(callee, 0, nil, nil)
+	// procNames := [...]wamp.URI{wamp.URI("nexus.test.proc0"), wamp.URI("nexus.test.proc1")}
+	// for i, name := range procNames {
+	// 	dealer.register(calleeSess, &wamp.Register{Request: wamp.ID(i + 1), Procedure: name})
+	// 	var rsp wamp.Message
+	// 	select {
+	// 	case rsp = <-callee.Recv():
+	// 	case <-time.After(time.Millisecond):
+	// 		require.FailNow(t, "timed out waiting for response")
+	// 	}
+	// 	switch rsp.(type) {
+	// 	case *wamp.Registered:
+	// 		break // correct
+	// 	case *wamp.Error:
+	// 		require.FailNow(t, "error registering procedure", rsp.(*wamp.Error))
+	// 	default:
+	// 		require.FailNow(t, "did not receive REGISTERED response got=", rsp.MessageType())
+	//
+	// 	}
+	// }
+
+	// Create a caller to test invocation of each procedure
+	// caller := newTestPeer()
+	// nextID := new(wamp.IDGen)
+	// callerSession := wamp.NewSession(caller, 9999, nil, nil)
+	const numCallers = 2
+	var caller [numCallers]*testPeer
+	var callerSess [numCallers]*wamp.Session
+	for i := 0; i < numCallers; i++ {
+		caller[i] = newTestPeer()
+		callerSess[i] = wamp.NewSession(caller[i], 0, nil, nil)
+	}
+
+	// makeCall := func(callSess *wamp.Session, procName wamp.URI) {
+	// 	dealer.call(
+	// 		callSess,
+	// 		&wamp.Call{Request: callSess.IdGen.Next(), Procedure: procName})
+	// }
+	// checkInvocationRsp := func(calleePeer *testPeer, expectedID int) wamp.Message {
+	// 	rsp, err := wamp.RecvTimeout(calleePeer, time.Second)
+	// 	require.Nil(t, err)
+	// 	if _, ok := rsp.(*wamp.Error); ok {
+	// 		require.FailNow(t, "unexpected error from callee", rsp.(*wamp.Error))
+	// 	}
+	//
+	// 	inv, ok := rsp.(*wamp.Invocation)
+	// 	require.True(t, ok, "expected INVOCATION; Got: ", rsp.MessageType().String())
+	// 	require.Equalf(t, wamp.ID(expectedID), inv.Request,
+	// 		"invocation request ID should be %d", expectedID)
+	//
+	// 	return rsp
+	// }
+	// checkInvocation := func(calleePeer *testPeer, expectedID int) {
+	// 	_ = checkInvocationRsp(calleePeer, expectedID)
+	// }
+
+	// Call procName and ensure callee got expectedID for INVOCATION.request
+	callAndCheckInvocationRequestID := func(callSess *wamp.Session, calleePeer *testPeer, procName wamp.URI, expectedID int) {
+		dealer.call(
+			callSess,
+			&wamp.Call{Request: callSess.IdGen.Next(), Procedure: procName})
+
+		rsp, err := wamp.RecvTimeout(calleePeer, time.Second)
+		require.Nil(t, err)
+		if _, ok := rsp.(*wamp.Error); ok {
+			require.FailNow(t, "unexpected error from callee", rsp.(*wamp.Error))
+		}
+
+		inv, ok := rsp.(*wamp.Invocation)
+		require.True(t, ok, "expected INVOCATION; Got: ", rsp.MessageType().String())
+		require.Equalf(t, wamp.ID(expectedID), inv.Request,
+			"invocation request ID should be %d", expectedID)
+
+		// flush any pending messages on caller session to check for errors
+		callerRecv := callSess.Recv()
+	FLUSH:
+		for {
+			select {
+			case rsp = <-callerRecv:
+				if wError, ok := rsp.(*wamp.Error); ok {
+					require.FailNow(t, "unexpected error from caller session", wError)
+				}
+				continue FLUSH
+			default:
+				break FLUSH
+			}
+		}
+	}
+
+	// Caller 0 invoke Callee 0 with both procedures
+	callAndCheckInvocationRequestID(callerSess[0], callee[0], procNames[0][0], 1)
+	callAndCheckInvocationRequestID(callerSess[0], callee[0], procNames[0][1], 2)
+	callAndCheckInvocationRequestID(callerSess[0], callee[0], procNames[0][1], 3)
+	callAndCheckInvocationRequestID(callerSess[0], callee[0], procNames[0][1], 4)
+	callAndCheckInvocationRequestID(callerSess[0], callee[0], procNames[0][0], 5)
+
+	// Caller 1 invoke Callee 0 with both procedures
+	callAndCheckInvocationRequestID(callerSess[1], callee[0], procNames[0][0], 1)
+	callAndCheckInvocationRequestID(callerSess[1], callee[0], procNames[0][1], 2)
+}
+
 func TestRemovePeer(t *testing.T) {
 	dealer, metaClient := newTestDealer(t)
 
