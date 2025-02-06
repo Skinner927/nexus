@@ -475,12 +475,14 @@ func (r *realm) handleInboundMessages(sess *wamp.Session) (bool, bool, error) {
 		case *wamp.Yield:
 			r.dealer.yield(sess, msg)
 		case *wamp.Call:
+			fmt.Println("Realm handleInboundMessages Call sess=", sess.ID, "msg", msg.Procedure, msg.Request)
 			r.dealer.call(sess, msg)
 		case *wamp.Cancel:
 			r.dealer.cancel(sess, msg)
 		case *wamp.Subscribe:
 			r.broker.subscribe(sess, msg)
 		case *wamp.Register:
+			fmt.Println("Realm handleInboundMessages Register sess=", sess.ID, "msg", msg.Procedure, msg.Request)
 			r.dealer.register(sess, msg)
 		case *wamp.Unsubscribe:
 			r.broker.unsubscribe(sess, msg)
