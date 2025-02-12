@@ -815,9 +815,6 @@ func (d *dealer) syncCall(caller *wamp.Session, msg *wamp.Call) {
 		invocationID = callee.IdGen.Next()
 		d.invocations[invocationID] = invk
 		d.invocationByCall[reqID] = invocationID
-
-		// fmt.Printf("callID=%v caller=%v callee=%v invID=%v &callee=%p &callee.IdGen=%p\n", invk.callID, caller.ID, callee.ID, invocationID, callee, callee.IdGen)
-
 	} else {
 		// It is an ongoing progressive call (not first one)
 		invk = d.invocations[storedInvocationID]

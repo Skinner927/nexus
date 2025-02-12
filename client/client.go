@@ -598,8 +598,7 @@ func (c *Client) Register(procedure string, fn InvocationHandler, options wamp.D
 		c.nameProcID[procedure] = msg.Registration
 		c.sess.Unlock()
 		if c.debug {
-			c.log.Println("Registered", procedure, "as registration",
-				msg.Registration)
+			c.log.Println("Registered", procedure, "as", msg.Registration)
 		}
 	case *wamp.Error:
 		return fmt.Errorf("registering procedure '%v': %s", procedure,
@@ -1455,34 +1454,25 @@ func (c *Client) runReceiveFromRouter(msg wamp.Message) bool {
 		c.runHandleEvent(msg)
 
 	case *wamp.Invocation:
-		fmt.Println("<< Invocation ID", msg.Request)
 		c.runHandleInvocation(msg)
 		c.updateLastRecvID(msg.Request)
 	case *wamp.Interrupt:
-		fmt.Println("<< Interrupt ID", msg.Request)
 		c.runHandleInterrupt(msg)
 		c.updateLastRecvID(msg.Request)
 
 	case *wamp.Registered:
-		fmt.Println("<< Reg ID", msg.Request, msg.Registration)
 		c.runSignalReply(msg, msg.Request)
 	case *wamp.Subscribed:
-		fmt.Println("<< Sub ID", msg.Request, msg.Subscription)
 		c.runSignalReply(msg, msg.Request)
 	case *wamp.Unsubscribed:
-		fmt.Println("<< UnSub ID", msg.Request)
 		c.runSignalReply(msg, msg.Request)
 	case *wamp.Unregistered:
-		fmt.Println("<< UnReg ID", msg.Request)
 		c.runSignalReply(msg, msg.Request)
 	case *wamp.Result:
-		fmt.Println("<< Result ID", msg.Request)
 		c.runSignalReply(msg, msg.Request)
 	case *wamp.Published:
-		fmt.Println("<< Publish ID", msg.Request, msg.Publication)
 		c.runSignalReply(msg, msg.Request)
 	case *wamp.Error:
-		fmt.Println("<< Error ID", msg.Request)
 		c.runSignalReply(msg, msg.Request)
 
 	case *wamp.Goodbye:
@@ -1628,7 +1618,6 @@ func (c *Client) runHandleInvocation(msg *wamp.Invocation) {
 	timeout, _ := wamp.AsInt64(msg.Details[wamp.OptTimeout])
 	progResOK, _ := msg.Details[wamp.OptReceiveProgress].(bool)
 	reqID := msg.Request
-	fmt.Println("REQID ", reqID)
 
 	c.sess.Lock()
 	handler, ok := c.invHandlers[msg.Registration]
