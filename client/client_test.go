@@ -709,21 +709,16 @@ func TestProgressiveCallInvocations(t *testing.T) {
 }
 
 // Tests that a callee can return error while caller IsInProgress
+// Test for #319 to ensure messages in-flight do not re-open the handlerQueue
+// or call the handler function after the callee has errored.
 func TestProgressiveCallInvocationCalleeError(t *testing.T) {
 	// Connect two clients to the same server
-	t.Setenv(debugRouterEnv, "1")
+	// t.Setenv(debugRouterEnv, "1")
 	t.Setenv(debugClientEnv, "1")
 	callee, caller, rooter := connectedTestClients(t)
 
-	var anotherCallee *Client
-	doit := false
-	if doit {
-		newCallee := newTestClient(t, rooter)
-		anotherCallee = newCallee
-	}
-
 	const forcedError = wamp.URI("error.forced")
-	moreArgsSent := make(chan struct{}, 1)
+	moreArgsSent := make(chan struct{})
 	errorRaised := false
 
 	invocationHandler := func(ctx context.Context, inv *wamp.Invocation) InvokeResult {
@@ -745,47 +740,34 @@ func TestProgressiveCallInvocationCalleeError(t *testing.T) {
 		default:
 			// BUG: The handler function should never be called again
 			t.Error("Handler should not have been called after error returned")
-			return InvokeResult{Err: forcedError}
+			return InvokeResult{Err: wamp.ErrInvalidArgument}
 		}
 	}
 
 	const procName = "nexus.test.progprocerr"
 
-	// TODO: drop this
-	registerOptions := wamp.Dict{}
-	registerOptions[wamp.OptInvoke] = "first"
-
-	if anotherCallee != nil {
-		er2 := anotherCallee.Register(procName, invocationHandler, registerOptions)
-		require.NoError(t, er2)
-	}
-
 	// Register procedure
-	err := callee.Register(procName, invocationHandler, registerOptions)
+	err := callee.Register(procName, invocationHandler, nil)
 	require.NoError(t, err)
 
 	// Test calling the procedure.
-	callArgs := []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+	callArgs := [...]int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
 	ctx := context.Background()
 
-	callSends := 0
+	sendCount := 0
 	sendProgDataCb := func(ctx context.Context) (options wamp.Dict, args wamp.List, kwargs wamp.Dict, err error) {
-		options = wamp.Dict{}
-
-		if callSends == (len(callArgs) - 1) {
-			options[wamp.OptProgress] = false
-		} else {
-			options[wamp.OptProgress] = true
+		options = wamp.Dict{
+			wamp.OptProgress: sendCount < (len(callArgs) - 1),
 		}
 
-		args = wamp.List{callArgs[callSends]}
-		callSends++
+		args = wamp.List{callArgs[sendCount]}
+		sendCount++
 
 		// signal the handler should return its error
-		if 4 == callSends {
-			moreArgsSent <- struct{}{}
+		if 4 == sendCount {
+			close(moreArgsSent)
 		}
-		t.Logf("Sending n=%v", callSends)
+		t.Logf("Sending n=%v", sendCount)
 
 		return options, args, nil, nil
 	}
@@ -799,12 +781,8 @@ func TestProgressiveCallInvocationCalleeError(t *testing.T) {
 	} else {
 		t.Error("Unexpected error type")
 	}
-	require.GreaterOrEqual(t, callSends, 4)
+	require.GreaterOrEqual(t, sendCount, 4)
 	require.True(t, errorRaised, "Error was never raised in handler")
-
-	// Test unregister.
-	err = callee.Unregister(procName)
-	// require.NoError(t, err)
 
 	// BUG: Show deadlock
 	t.Log("Closing rooter")

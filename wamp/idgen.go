@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-const maxID int64 = 1 << 53
+const MaxID int64 = 1 << 53
 
 func init() {
 	rand.Seed(time.Now().UnixNano())
@@ -14,7 +14,7 @@ func init() {
 
 // NewID generates a random WAMP ID.
 func GlobalID() ID {
-	return ID(rand.Int63n(maxID)) //nolint:gosec
+	return ID(rand.Int63n(MaxID)) //nolint:gosec
 }
 
 // IDGen is generator for WAMP request IDs.  Create with new(IDGen).
@@ -35,7 +35,7 @@ type IDGen struct {
 // Next returns next ID.
 func (g *IDGen) Next() ID {
 	g.next++
-	if g.next > maxID {
+	if g.next > MaxID {
 		g.next = 1
 	}
 	return ID(g.next)
@@ -52,12 +52,4 @@ func (g *SyncIDGen) Next() ID {
 	g.lock.Lock()
 	defer g.lock.Unlock()
 	return g.IDGen.Next()
-}
-
-// TODO: DROP
-// PeekCurrent returns the current value to be used to detect rollover
-func (g *SyncIDGen) PeekCurrent() ID {
-	g.lock.Lock()
-	defer g.lock.Unlock()
-	return ID(g.IDGen.next)
 }
