@@ -46,9 +46,6 @@ type Client struct {
 	responseTimeout time.Duration
 	awaitingReply   map[wamp.ID]chan wamp.Message
 	authHandlers    map[string]AuthFunc
-	// Greatest value of Dealer's end of Session Scope ID
-	// Use isNewRecvID() and updateLastRecvID() for comparison/update.
-	lastRecvID wamp.ID
 
 	eventHandlers map[wamp.ID]EventHandler
 	topicSubID    map[string]wamp.ID
@@ -244,7 +241,6 @@ func NewClient(p wamp.Peer, cfg Config) (*Client, error) {
 
 		responseTimeout: cfg.ResponseTimeout,
 		awaitingReply:   map[wamp.ID]chan wamp.Message{},
-		lastRecvID:      0,
 
 		eventHandlers: map[wamp.ID]EventHandler{},
 		topicSubID:    map[string]wamp.ID{},
@@ -1453,10 +1449,10 @@ func (c *Client) runReceiveFromRouter(msg wamp.Message) bool {
 
 	case *wamp.Invocation:
 		c.runHandleInvocation(msg)
-		c.updateLastRecvID(msg.Request)
+		c.sess.UpdateLastRecvID(msg.Request)
 	case *wamp.Interrupt:
 		c.runHandleInterrupt(msg)
-		c.updateLastRecvID(msg.Request)
+		c.sess.UpdateLastRecvID(msg.Request)
 
 	case *wamp.Registered:
 		c.runSignalReply(msg, msg.Request)
@@ -1482,44 +1478,6 @@ func (c *Client) runReceiveFromRouter(msg wamp.Message) bool {
 
 	default:
 		c.log.Println("Unhandled message from router:", msg.MessageType(), msg)
-	}
-	return false
-}
-
-// Update lastRecvID with Request IDs coming from the Dealer.
-// This is our only way to track the session-based request IDs the Dealer
-// is sending.
-func (c *Client) updateLastRecvID(id wamp.ID) {
-	c.sess.Lock()
-	defer c.sess.Unlock()
-
-	if c.isNewRecvID(id) {
-		c.lastRecvID = id
-	}
-}
-
-// Check if this ID is considered new
-func (c *Client) isNewRecvID(id wamp.ID) bool {
-	const fudge = 10
-	const upperID = wamp.ID(wamp.MaxID - fudge)
-	const lowerID = wamp.ID(fudge)
-	current := c.lastRecvID
-
-	if id > current {
-		return true
-	}
-	if id == current {
-		return false
-	}
-
-	// rollover / wraparound
-	if current > upperID && id < lowerID {
-		// It would be really nice if we could trust that when lastRecvID is
-		// MaxID the next ID would be 1, but it's completely possible for a
-		// Dealer to skip IDs if there were internal errors or if it incorrectly
-		// uses Dealer scoped IDs instead of Session scoped (*cough* Nexus).
-		// In order to maximize compatability, we use a fudged value.
-		return true
 	}
 	return false
 }
@@ -1691,7 +1649,7 @@ func (c *Client) runHandleInvocation(msg *wamp.Invocation) {
 	ctx := c.invHandlersCtxs[cliInvocation]
 	if !queueExists {
 		// Only create the queue if this is a new request
-		if !c.isNewRecvID(reqID) {
+		if !c.sess.UpdateLastRecvIDCallerHasSessionLock(reqID) {
 			c.sess.Unlock()
 			if c.debug {
 				c.log.Println("Ignoring Invocation with expired reqID=", reqID)

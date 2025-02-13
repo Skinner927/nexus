@@ -16,6 +16,9 @@ type Session struct {
 	// Details about session.
 	Details Dict
 	IdGen   *SyncIDGen
+	// Greatest value of Dealer's end of Session Scope ID
+	// Use IsNewRecvID() and UpdateLastRecvID() for comparison/update.
+	lastRecvID ID
 
 	// Roles and features supported by peer.
 	roles map[string]map[string]struct{}
@@ -162,4 +165,50 @@ func (s *Session) setRoles(details Dict) {
 		roleMap[role] = featMap
 	}
 	s.roles = roleMap
+}
+
+// UpdateLastRecvID updates the Session's lastRecvID with IDs coming from the
+// other end. Returns true if this is a new ID.
+// This is our only way to track the session-based request IDs to determine if
+// we're responding to a new request.
+func (s *Session) UpdateLastRecvID(id ID) bool {
+	s.Lock()
+	defer s.Unlock()
+	return s.UpdateLastRecvIDCallerHasSessionLock(id)
+}
+
+// UpdateLastRecvIDCallerHasSessionLock works just like UpdateLastRecvID if you
+// already have a session lock.
+func (s *Session) UpdateLastRecvIDCallerHasSessionLock(id ID) bool {
+	if s.IsNewRecvID(id) {
+		s.lastRecvID = id
+		return true
+	}
+	return false
+}
+
+// Check if this ID is considered new
+func (s *Session) IsNewRecvID(id ID) bool {
+	const fudge = 10
+	const upperID = ID(MaxID - fudge)
+	const lowerID = ID(fudge)
+	current := s.lastRecvID
+
+	if id > current {
+		return true
+	}
+	if id == current {
+		return false
+	}
+
+	// rollover / wraparound
+	if current > upperID && id < lowerID {
+		// It would be really nice if we could trust that when lastRecvID is
+		// MaxID the next ID would be 1, but it's completely possible for a
+		// Dealer to skip IDs if there were internal errors or if it incorrectly
+		// uses Dealer scoped IDs instead of Session scoped (*cough* Nexus).
+		// In order to maximize compatability, we use a fudged value.
+		return true
+	}
+	return false
 }
