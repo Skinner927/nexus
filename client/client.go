@@ -46,7 +46,8 @@ type Client struct {
 	responseTimeout time.Duration
 	awaitingReply   map[wamp.ID]chan wamp.Message
 	authHandlers    map[string]AuthFunc
-	// Scoped to Dealer's session with us
+	// Greatest value of Dealer's end of Session Scope ID
+	// Use isNewRecvID() and updateLastRecvID() for comparison/update.
 	lastRecvID wamp.ID
 
 	eventHandlers map[wamp.ID]EventHandler
@@ -71,8 +72,6 @@ type Client struct {
 	closed bool
 
 	routerGoodbye *wamp.Goodbye
-	// TODO: Remove this and use session instead
-	idGen *wamp.SyncIDGen
 }
 
 // InvokeResult represents the result of invoking a procedure.
@@ -260,7 +259,6 @@ func NewClient(p wamp.Peer, cfg Config) (*Client, error) {
 		log:        cfg.Logger,
 		debug:      cfg.Debug,
 		cancelMode: wamp.CancelModeKillNoWait,
-		idGen:      new(wamp.SyncIDGen),
 	}
 	c.ctx, c.cancel = context.WithCancel(context.Background())
 	go c.run() // start the core goroutine
@@ -317,7 +315,7 @@ func (c *Client) Subscribe(topic string, fn EventHandler, options wamp.Dict) err
 	if options == nil {
 		options = wamp.Dict{}
 	}
-	id := c.idGen.Next()
+	id := c.sess.IdGen.Next()
 	c.expectReply(id)
 	c.sess.Send() <- &wamp.Subscribe{
 		Request: id,
@@ -388,7 +386,7 @@ func (c *Client) Unsubscribe(topic string) error {
 		return ErrNotConn
 	}
 
-	id := c.idGen.Next()
+	id := c.sess.IdGen.Next()
 	c.expectReply(id)
 	c.sess.Send() <- &wamp.Unsubscribe{
 		Request:      id,
@@ -457,7 +455,7 @@ func (c *Client) Publish(topic string, options wamp.Dict, args wamp.List, kwargs
 		return ErrNotConn
 	}
 
-	id := c.idGen.Next()
+	id := c.sess.IdGen.Next()
 
 	var pubAck bool
 	if options == nil {
@@ -574,7 +572,7 @@ func (c *Client) Register(procedure string, fn InvocationHandler, options wamp.D
 	if !c.Connected() {
 		return ErrNotConn
 	}
-	id := c.idGen.Next()
+	id := c.sess.IdGen.Next()
 	c.expectReply(id)
 	if options == nil {
 		options = wamp.Dict{}
@@ -639,7 +637,7 @@ func (c *Client) Unregister(procedure string) error {
 		return ErrNotConn
 	}
 
-	id := c.idGen.Next()
+	id := c.sess.IdGen.Next()
 	c.expectReply(id)
 	c.sess.Send() <- &wamp.Unregister{
 		Request:      id,
@@ -761,7 +759,7 @@ func (c *Client) Call(ctx context.Context, procedure string, options wamp.Dict, 
 		}()
 	}
 
-	id := c.idGen.Next()
+	id := c.sess.IdGen.Next()
 	c.expectReply(id)
 	message := &wamp.Call{
 		Request:   id,
@@ -860,7 +858,7 @@ func (c *Client) CallProgressive(ctx context.Context, procedure string, sendProg
 		}()
 	}
 
-	id := c.idGen.Next()
+	id := c.sess.IdGen.Next()
 	c.expectReply(id)
 	message := &wamp.Call{
 		Request:   id,
